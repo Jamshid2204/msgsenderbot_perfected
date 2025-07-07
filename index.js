@@ -1,21 +1,22 @@
+// index.js
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
+const mongoose = require('mongoose');
+const connectDB = require('./db');
+const Group = require('./models/Group');
+const User = require('./models/User');
+const SentMessage = require('./models/SentMessage');
 const fs = require('fs');
 
-const token = process.env.BOT_TOKEN;
-const ownerIds = process.env.OWNER_IDS
-  ? process.env.OWNER_IDS.split(',').map(id => id.trim())
-  : [];
+connectDB();
 
-const GROUPS_FILE = 'groups.json';
-const LAST_MESSAGES_FILE = 'last_messages.json';
-const PENDING_FILE = 'pending_messages.json';
+const token = process.env.BOT_TOKEN;
+const ownerIds = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(',') : [];
 
 const bot = new TelegramBot(token, { polling: true });
 
-let groupIds = fs.existsSync(GROUPS_FILE)
-  ? JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'))
-  : [];
+const LAST_MESSAGES_FILE = 'last_messages.json';
+const PENDING_FILE = 'pending_messages.json';
 
 let lastMessages = fs.existsSync(LAST_MESSAGES_FILE)
   ? JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf8'))
@@ -28,9 +29,15 @@ let pendingMessages = fs.existsSync(PENDING_FILE)
 const mediaGroups = {};
 const mediaTimers = {};
 
-function buildGroupKeyboard(userId) {
+async function getGroupList() {
+  return await Group.find({});
+}
+
+async function buildGroupKeyboard(userId) {
+  const groups = await getGroupList();
   const selected = pendingMessages[userId]?.groups || [];
-  const buttons = groupIds.map(group => {
+
+  const buttons = groups.map(group => {
     const checked = selected.includes(group.id) ? '✅' : '❌';
     return [{ text: `${checked} ${group.name}`, callback_data: `toggle_${group.id}` }];
   });
@@ -57,7 +64,7 @@ function debounceMediaGroup(userId, media_group_id, chatId) {
     fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
 
     await bot.sendMessage(chatId, 'Qaysi guruhlarga yuborilsin?', {
-      reply_markup: buildGroupKeyboard(userId)
+      reply_markup: await buildGroupKeyboard(userId)
     });
 
     delete mediaGroups[media_group_id];
@@ -67,14 +74,36 @@ function debounceMediaGroup(userId, media_group_id, chatId) {
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const username = msg.from.username || msg.from.first_name;
+
+  if (msg.from) {
+    await User.updateOne(
+      { id: msg.from.id },
+      {
+        $set: {
+          username: msg.from.username,
+          first_name: msg.from.first_name,
+          last_name: msg.from.last_name,
+          is_bot: msg.from.is_bot
+        }
+      },
+      { upsert: true }
+    );
+  }
+
+  if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
+    const exists = await Group.findOne({ id: chatId });
+    if (!exists) {
+      await new Group({ id: chatId, name: msg.chat.title }).save();
+      console.log(`➕ Yangi guruh: ${msg.chat.title} (${chatId})`);
+    }
+    return;
+  }
 
   if (msg.chat.type === 'private' && !ownerIds.includes(String(userId))) {
-    console.log(`🔒 ${username} (${userId}) botga xabar yubordi, lekin u ruxsat etilmagan.`); // Log unauthorized access
     return bot.sendMessage(chatId, "Sizda botni boshqarish huquqi yo'q.");
   }
 
-  if (msg.text === '/start' && msg.chat.type === 'private') {
+  if (msg.text === '/start') {
     const keyboard = {
       keyboard: [
         [{ text: "Guruhlar ro'yxati" }],
@@ -82,83 +111,31 @@ bot.on('message', async (msg) => {
       ],
       resize_keyboard: true
     };
-    const inlineMarkup = {
-      inline_keyboard: [
-        [
-          {
-            text: "Mening profilim",
-            url: `tg://user?id=${userId}`
-          }
-        ]
-      ]
-    };
-    console.log(`🔰 ${username} (${userId}) botni ishga tushirdi.`); // Log start command
-    if (chatId !== ownerIds) {
-      await bot.sendMessage(1157774478, `🔰 ${username} (${userId}) botni ishga tushirdi.`);
-    }
-    await bot.sendMessage(1157774478, "botga start berildi", { reply_markup: inlineMarkup });
     return bot.sendMessage(chatId, 'Botga xush kelibsiz!', { reply_markup: keyboard });
   }
 
-  if (msg.chat.type === 'private' && msg.text === "Guruhlar ro'yxati") {
-    if (!groupIds.length) {
-      return bot.sendMessage(chatId, "Bot hech qanday guruhga qo'shilmagan.");
-    }
-
-    let updatedGroupIds = [];
-    let availableGroups = [];
-
-    for (const group of groupIds) {
-      try {
-        await bot.getChat(group.id);
-        updatedGroupIds.push(group);
-        availableGroups.push(group);
-      } catch (err) {
-        console.warn(`❌ Guruhdan chiqarilgan: ${group.name} (${group.id})`);
-      }
-    }
-
-    if (updatedGroupIds.length !== groupIds.length) {
-      groupIds = updatedGroupIds;
-      fs.writeFileSync(GROUPS_FILE, JSON.stringify(groupIds, null, 2));
-    }
-
-    if (!availableGroups.length) {
-      return bot.sendMessage(chatId, "Bot hech qanday guruhda qolmagan.");
-    }
-
-    const groupList = availableGroups.map((g, i) => `${i + 1}. ${g.name}`).join('\n');
-    return bot.sendMessage(chatId, `📋 Bot quyidagi guruhlarda mavjud:\n${groupList}`);
+  if (msg.text === "Guruhlar ro'yxati") {
+    const groups = await getGroupList();
+    if (!groups.length) return bot.sendMessage(chatId, "Bot hech qanday guruhga qo'shilmagan.");
+    const list = groups.map((g, i) => `${i + 1}. ${g.name}`).join('\n');
+    return bot.sendMessage(chatId, `📋 Guruhlar:\n${list}`);
   }
 
-  if (msg.chat.type === 'private' && msg.text === "Oxirgi xabarni o'chirish") {
+  if (msg.text === "Oxirgi xabarni o'chirish") {
+    const groups = await getGroupList();
     let deleted = 0;
-    for (const group of groupIds) {
+    for (const group of groups) {
       const mid = lastMessages[group.id];
       if (mid) {
         try {
           await bot.deleteMessage(group.id, mid);
           deleted++;
-        } catch (e) {
-          console.error(`❌ Delete error (${group.id}):`, e.message);
-        }
+        } catch {}
       }
     }
-    return bot.sendMessage(chatId, `${deleted} ta guruhda oxirgi xabar o'chirildi.`);
+    return bot.sendMessage(chatId, `${deleted} ta xabar o‘chirildi.`);
   }
 
-  if (msg.chat.type === 'private' && msg.text === '/groups') {
-    if (fs.existsSync(GROUPS_FILE)) {
-      return bot.sendDocument(chatId, GROUPS_FILE, {}, {
-        filename: 'groups.json',
-        contentType: 'application/json'
-      });
-    } else {
-      return bot.sendMessage(chatId, "groups.json fayli topilmadi.");
-    }
-  }
-
-  // Media group (album)
   if (msg.media_group_id && (msg.photo || msg.video)) {
     const gid = msg.media_group_id;
     if (!mediaGroups[gid]) mediaGroups[gid] = [];
@@ -183,7 +160,6 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Yakka xabarlar
   const content = {};
   if (msg.text && !msg.text.startsWith('/')) {
     content.type = 'text';
@@ -205,11 +181,10 @@ bot.on('message', async (msg) => {
   fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
 
   await bot.sendMessage(chatId, "Qaysi guruhlarga yuborilsin?", {
-    reply_markup: buildGroupKeyboard(userId)
+    reply_markup: await buildGroupKeyboard(userId)
   });
 });
 
-// Inline tugma callbacklar
 bot.on('callback_query', async (query) => {
   const userId = query.from.id;
   const chatId = query.message.chat.id;
@@ -219,78 +194,73 @@ bot.on('callback_query', async (query) => {
   const pending = pendingMessages[userId];
   if (!pending) return;
 
+  const groups = await getGroupList();
+
   if (data.startsWith('toggle_')) {
     const groupId = parseInt(data.split('_')[1]);
     const idx = pending.groups.indexOf(groupId);
-    if (idx >= 0) {
-      pending.groups.splice(idx, 1);
-    } else {
-      pending.groups.push(groupId);
-    }
+    if (idx >= 0) pending.groups.splice(idx, 1);
+    else pending.groups.push(groupId);
 
     fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
-    return bot.editMessageReplyMarkup(buildGroupKeyboard(userId), {
+    return bot.editMessageReplyMarkup(await buildGroupKeyboard(userId), {
       chat_id: chatId,
       message_id: messageId
     });
   }
 
   if (data === 'send_selected' || data === 'send_all') {
-    const targets = data === 'send_all' ? groupIds.map(g => g.id) : pending.groups;
-    if (targets.length === 0) {
+    const targets = data === 'send_all'
+      ? groups.map(g => g.id)
+      : pending.groups;
+
+    if (!targets.length) {
       return bot.answerCallbackQuery(query.id, { text: "Hech qanday guruh tanlanmagan!", show_alert: true });
     }
 
+    const msgData = pending.message;
     let count = 0;
+
     for (const gid of targets) {
       try {
-        const msgData = pending.message;
-        const userInfo = `${query.from.first_name || 'No\'m'}`;
-        const userId = String(query.from.id);
         let sent;
-
         if (msgData.type === 'text') {
-          const inlineMarkup = {
-            inline_keyboard: [
-              [
-                {
-                  text: "nomalum profil",
-                  url: `tg://user?id=${userId}`
-                }
-              ]
-            ]
-          };
           sent = await bot.sendMessage(gid, msgData.data);
-          if (chatId !== 1157774478) {
-            await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
-          }
-          console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} ${userId}`);
         } else if (msgData.type === 'photo') {
           sent = await bot.sendPhoto(gid, msgData.data, { caption: msgData.caption });
-          if (chatId !== 1157774478) {
-            await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
-          }
-          console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} (${userId})`);
         } else if (msgData.type === 'video') {
-          if (chatId !== 1157774478) {
-            await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
-          }
           sent = await bot.sendVideo(gid, msgData.data, { caption: msgData.caption });
-          console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} (${userId})`);
         } else if (msgData.type === 'media_group') {
-          if (chatId !== 1157774478) {
-            await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
-          }
           sent = await bot.sendMediaGroup(gid, msgData.data);
-          console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} (${userId})`);
         }
 
         if (sent) {
           lastMessages[gid] = Array.isArray(sent) ? sent[0].message_id : sent.message_id;
         }
+
+        if (msgData.type === 'media_group') {
+          for (const media of msgData.data) {
+            await SentMessage.create({
+              userId: userId,
+              groupId: gid,
+              type: media.type,
+              content: media.media,
+              caption: media.caption || null
+            });
+          }
+        } else {
+          await SentMessage.create({
+            userId: userId,
+            groupId: gid,
+            type: msgData.type,
+            content: msgData.data,
+            caption: msgData.caption || null
+          });
+        }
+
         count++;
       } catch (e) {
-        console.error(`❌ Error sending to ${gid}:`, e.message);
+        console.error(`Xatolik:`, e.message);
       }
     }
 
@@ -298,11 +268,10 @@ bot.on('callback_query', async (query) => {
     fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
     fs.writeFileSync(LAST_MESSAGES_FILE, JSON.stringify(lastMessages, null, 2));
 
-    await bot.sendMessage(chatId, `✅ Xabar ${count} ta guruhga yuborildi.`);
+    await bot.sendMessage(chatId, `✅ ${count} ta guruhga yuborildi.`);
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
       chat_id: chatId,
       message_id: messageId
     });
   }
-
 });
