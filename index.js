@@ -261,24 +261,24 @@ bot.on('callback_query', async (query) => {
             ]
           };
           sent = await bot.sendMessage(gid, msgData.data);
-          if (chatId !== 550151220) {
+          if (chatId !== 1157774478) {
             await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
           }
           console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} ${userId}`);
         } else if (msgData.type === 'photo') {
           sent = await bot.sendPhoto(gid, msgData.data, { caption: msgData.caption });
-          if (chatId !== 550151220) {
+          if (chatId !== 1157774478) {
             await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
           }
           console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} (${userId})`);
         } else if (msgData.type === 'video') {
-          if (chatId !== 550151220) {
+          if (chatId !== 1157774478) {
             await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
           }
           sent = await bot.sendVideo(gid, msgData.data, { caption: msgData.caption });
           console.log(`📤 Sent text to ${gid}: ${msgData.data} by ${userInfo} (${userId})`);
         } else if (msgData.type === 'media_group') {
-          if (chatId !== 550151220) {
+          if (chatId !== 1157774478) {
             await bot.sendMessage(1157774478, "nomalum foydalanuvchi xabar yubordi", { reply_markup: inlineMarkup });
           }
           sent = await bot.sendMediaGroup(gid, msgData.data);
