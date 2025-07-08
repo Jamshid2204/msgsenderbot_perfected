@@ -6,7 +6,7 @@ const connectDB = require('./db');
 const Group = require('./models/Group');
 const User = require('./models/User');
 const SentMessage = require('./models/SentMessage');
-const fs = require('fs');
+const PendingMessage = require('./models/PendingMessage');
 
 connectDB();
 
@@ -14,17 +14,6 @@ const token = process.env.BOT_TOKEN;
 const ownerIds = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(',') : [];
 
 const bot = new TelegramBot(token, { polling: true });
-
-const LAST_MESSAGES_FILE = 'last_messages.json';
-const PENDING_FILE = 'pending_messages.json';
-
-let lastMessages = fs.existsSync(LAST_MESSAGES_FILE)
-  ? JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf8'))
-  : {};
-
-let pendingMessages = fs.existsSync(PENDING_FILE)
-  ? JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'))
-  : {};
 
 const mediaGroups = {};
 const mediaTimers = {};
@@ -35,7 +24,8 @@ async function getGroupList() {
 
 async function buildGroupKeyboard(userId) {
   const groups = await getGroupList();
-  const selected = pendingMessages[userId]?.groups || [];
+  const pending = await PendingMessage.findOne({ userId });
+  const selected = pending?.groups || [];
 
   const buttons = groups.map(group => {
     const checked = selected.includes(group.id) ? '✅' : '❌';
@@ -57,11 +47,15 @@ function debounceMediaGroup(userId, media_group_id, chatId) {
     const items = mediaGroups[media_group_id];
     if (!items || !items.length) return;
 
-    pendingMessages[userId] = {
-      message: { type: 'media_group', data: items },
-      groups: []
-    };
-    fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
+    await PendingMessage.findOneAndUpdate(
+      { userId },
+      {
+        userId,
+        message: { type: 'media_group', data: items },
+        groups: []
+      },
+      { upsert: true }
+    );
 
     await bot.sendMessage(chatId, 'Qaysi guruhlarga yuborilsin?', {
       reply_markup: await buildGroupKeyboard(userId)
@@ -125,10 +119,10 @@ bot.on('message', async (msg) => {
     const groups = await getGroupList();
     let deleted = 0;
     for (const group of groups) {
-      const mid = lastMessages[group.id];
-      if (mid) {
+      const lastMsg = await SentMessage.findOne({ groupId: group.id }).sort({ sentAt: -1 });
+      if (lastMsg) {
         try {
-          await bot.deleteMessage(group.id, mid);
+          await bot.deleteMessage(group.id, lastMsg.telegramMessageId);
           deleted++;
         } catch {}
       }
@@ -174,11 +168,15 @@ bot.on('message', async (msg) => {
     content.caption = msg.caption || '';
   } else return;
 
-  pendingMessages[userId] = {
-    message: content,
-    groups: []
-  };
-  fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
+  await PendingMessage.findOneAndUpdate(
+    { userId },
+    {
+      userId,
+      message: content,
+      groups: []
+    },
+    { upsert: true }
+  );
 
   await bot.sendMessage(chatId, "Qaysi guruhlarga yuborilsin?", {
     reply_markup: await buildGroupKeyboard(userId)
@@ -191,7 +189,7 @@ bot.on('callback_query', async (query) => {
   const messageId = query.message.message_id;
   const data = query.data;
 
-  const pending = pendingMessages[userId];
+  const pending = await PendingMessage.findOne({ userId });
   if (!pending) return;
 
   const groups = await getGroupList();
@@ -202,7 +200,7 @@ bot.on('callback_query', async (query) => {
     if (idx >= 0) pending.groups.splice(idx, 1);
     else pending.groups.push(groupId);
 
-    fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
+    await pending.save();
     return bot.editMessageReplyMarkup(await buildGroupKeyboard(userId), {
       chat_id: chatId,
       message_id: messageId
@@ -235,27 +233,28 @@ bot.on('callback_query', async (query) => {
         }
 
         if (sent) {
-          lastMessages[gid] = Array.isArray(sent) ? sent[0].message_id : sent.message_id;
-        }
-
-        if (msgData.type === 'media_group') {
-          for (const media of msgData.data) {
+          const now = new Date();
+          if (msgData.type === 'media_group') {
+            for (const media of msgData.data) {
+              await SentMessage.create({
+                userId,
+                groupId: gid,
+                type: media.type,
+                content: media.media,
+                caption: media.caption || null,
+                sentAt: now
+              });
+            }
+          } else {
             await SentMessage.create({
-              userId: userId,
+              userId,
               groupId: gid,
-              type: media.type,
-              content: media.media,
-              caption: media.caption || null
+              type: msgData.type,
+              content: msgData.data,
+              caption: msgData.caption || null,
+              sentAt: now
             });
           }
-        } else {
-          await SentMessage.create({
-            userId: userId,
-            groupId: gid,
-            type: msgData.type,
-            content: msgData.data,
-            caption: msgData.caption || null
-          });
         }
 
         count++;
@@ -264,9 +263,7 @@ bot.on('callback_query', async (query) => {
       }
     }
 
-    delete pendingMessages[userId];
-    fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingMessages, null, 2));
-    fs.writeFileSync(LAST_MESSAGES_FILE, JSON.stringify(lastMessages, null, 2));
+    await PendingMessage.deleteOne({ userId });
 
     await bot.sendMessage(chatId, `✅ ${count} ta guruhga yuborildi.`);
     await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
