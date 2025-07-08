@@ -1,12 +1,13 @@
 const mongoose = require('mongoose');
 
-const sentMessageSchema = new mongoose.Schema({
-  userId: { type: Number, required: true },
-  groupId: { type: Number, required: true },
-  type: { type: String, required: true }, // text, photo, video, media_group
-  content: mongoose.Schema.Types.Mixed,   // could be text or file_id
+const schema = new mongoose.Schema({
+  userId: Number,
+  groupId: Number,
+  type: String,
+  content: String,
   caption: String,
-  sentAt: { type: Date, default: Date.now }
+  sentAt: { type: Date, default: Date.now },
+  telegramMessageId: Number // agar kerak bo‘lsa
 });
 
-module.exports = mongoose.model('SentMessage', sentMessageSchema);
+module.exports = mongoose.model('SentMessage', schema);
